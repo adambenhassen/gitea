@@ -1608,6 +1608,136 @@ jobs:
 	})
 }
 
+// TestWorkflowConcurrencyWaitingState tests that concurrency groups block runs
+// even when the first run is still in "Waiting" state (not yet picked up by a runner).
+// This is a regression test for: https://github.com/go-gitea/gitea/issues/XXXXX
+func TestWorkflowConcurrencyWaitingState(t *testing.T) {
+	onGiteaRun(t, func(t *testing.T, u *url.URL) {
+		user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
+		session := loginUser(t, user2.Name)
+		token := getTokenForLoggedInUser(t, session, auth_model.AccessTokenScopeWriteRepository, auth_model.AccessTokenScopeWriteUser)
+
+		apiRepo := createActionsTestRepo(t, token, "actions-concurrency", false)
+		repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: apiRepo.ID})
+		httpContext := NewAPITestContext(t, user2.Name, repo.Name, auth_model.AccessTokenScopeWriteRepository)
+		defer doAPIDeleteRepository(httpContext)(t)
+
+		// Register a runner but we will intentionally NOT fetch tasks immediately
+		runner := newMockRunner()
+		runner.registerAsRepoRunner(t, user2.Name, repo.Name, "mock-runner", []string{"ubuntu-latest"}, false)
+
+		wf1TreePath := ".gitea/workflows/waiting-concurrency-1.yml"
+		wf1FileContent := `name: waiting-concurrency-1
+on:
+  push:
+    paths:
+      - '.gitea/workflows/waiting-concurrency-1.yml'
+concurrency:
+  group: waiting-test-group
+jobs:
+  job1:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'job1'
+`
+		wf2TreePath := ".gitea/workflows/waiting-concurrency-2.yml"
+		wf2FileContent := `name: waiting-concurrency-2
+on:
+  push:
+    paths:
+      - '.gitea/workflows/waiting-concurrency-2.yml'
+concurrency:
+  group: waiting-test-group
+jobs:
+  job2:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'job2'
+`
+		wf3TreePath := ".gitea/workflows/waiting-concurrency-3.yml"
+		wf3FileContent := `name: waiting-concurrency-3
+on:
+  push:
+    paths:
+      - '.gitea/workflows/waiting-concurrency-3.yml'
+concurrency:
+  group: waiting-test-group
+jobs:
+  job3:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'job3'
+`
+
+		// Push workflow1 - this creates run1 with StatusWaiting
+		opts1 := getWorkflowCreateFileOptions(user2, repo.DefaultBranch, "create "+wf1TreePath, wf1FileContent)
+		createWorkflowFile(t, token, user2.Name, repo.Name, wf1TreePath, opts1)
+
+		// Verify run1 is created and in Waiting status
+		run1 := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRun{RepoID: repo.ID, WorkflowID: "waiting-concurrency-1.yml"})
+		assert.Equal(t, "waiting-test-group", run1.ConcurrencyGroup)
+		assert.Equal(t, actions_model.StatusWaiting, run1.Status)
+
+		// Push workflow2 WITHOUT fetching run1 first - this is the key part of the test
+		// Run2 should be blocked because run1 is waiting in the same concurrency group
+		opts2 := getWorkflowCreateFileOptions(user2, repo.DefaultBranch, "create "+wf2TreePath, wf2FileContent)
+		createWorkflowFile(t, token, user2.Name, repo.Name, wf2TreePath, opts2)
+
+		// Verify run2 is created and BLOCKED (not Waiting)
+		run2 := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRun{RepoID: repo.ID, WorkflowID: "waiting-concurrency-2.yml"})
+		assert.Equal(t, "waiting-test-group", run2.ConcurrencyGroup)
+		assert.Equal(t, actions_model.StatusBlocked, run2.Status, "run2 should be blocked because run1 is waiting")
+
+		// Push workflow3 WITHOUT fetching any tasks
+		opts3 := getWorkflowCreateFileOptions(user2, repo.DefaultBranch, "create "+wf3TreePath, wf3FileContent)
+		createWorkflowFile(t, token, user2.Name, repo.Name, wf3TreePath, opts3)
+
+		// Verify run3 is also BLOCKED
+		run3 := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRun{RepoID: repo.ID, WorkflowID: "waiting-concurrency-3.yml"})
+		assert.Equal(t, "waiting-test-group", run3.ConcurrencyGroup)
+		assert.Equal(t, actions_model.StatusBlocked, run3.Status, "run3 should be blocked because run1 is waiting")
+
+		// Now fetch task - only run1 should be fetchable
+		task1 := runner.fetchTask(t)
+		_, _, fetchedRun1 := getTaskAndJobAndRunByTaskID(t, task1.Id)
+		assert.Equal(t, "waiting-concurrency-1.yml", fetchedRun1.WorkflowID)
+		assert.Equal(t, actions_model.StatusRunning, fetchedRun1.Status)
+
+		// Cannot fetch more tasks because run1 is still running
+		runner.fetchNoTask(t)
+
+		// Complete run1
+		runner.execTask(t, task1, &mockTaskOutcome{
+			result: runnerv1.Result_RESULT_SUCCESS,
+		})
+
+		// Now run2 should become fetchable
+		task2 := runner.fetchTask(t)
+		_, _, fetchedRun2 := getTaskAndJobAndRunByTaskID(t, task2.Id)
+		assert.Equal(t, "waiting-concurrency-2.yml", fetchedRun2.WorkflowID)
+		assert.Equal(t, actions_model.StatusRunning, fetchedRun2.Status)
+
+		// Complete run2
+		runner.execTask(t, task2, &mockTaskOutcome{
+			result: runnerv1.Result_RESULT_SUCCESS,
+		})
+
+		// Now run3 should become fetchable
+		task3 := runner.fetchTask(t)
+		_, _, fetchedRun3 := getTaskAndJobAndRunByTaskID(t, task3.Id)
+		assert.Equal(t, "waiting-concurrency-3.yml", fetchedRun3.WorkflowID)
+		assert.Equal(t, actions_model.StatusRunning, fetchedRun3.Status)
+
+		// Complete run3
+		runner.execTask(t, task3, &mockTaskOutcome{
+			result: runnerv1.Result_RESULT_SUCCESS,
+		})
+
+		// No more tasks
+		runner.fetchNoTask(t)
+	})
+}
+
 func TestRunAndJobWithSameConcurrencyGroup(t *testing.T) {
 	onGiteaRun(t, func(t *testing.T, u *url.URL) {
 		user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})

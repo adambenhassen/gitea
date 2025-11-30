@@ -78,7 +78,7 @@ func shouldBlockJobByConcurrency(ctx context.Context, job *actions_model.ActionR
 		return false, nil
 	}
 
-	runs, jobs, err := actions_model.GetConcurrentRunsAndJobs(ctx, job.RepoID, job.ConcurrencyGroup, []actions_model.Status{actions_model.StatusRunning})
+	runs, jobs, err := actions_model.GetConcurrentRunsAndJobs(ctx, job.RepoID, job.ConcurrencyGroup, []actions_model.Status{actions_model.StatusRunning, actions_model.StatusWaiting})
 	if err != nil {
 		return false, fmt.Errorf("GetConcurrentRunsAndJobs: %w", err)
 	}
@@ -109,7 +109,7 @@ func shouldBlockRunByConcurrency(ctx context.Context, actionRun *actions_model.A
 		return false, nil
 	}
 
-	runs, jobs, err := actions_model.GetConcurrentRunsAndJobs(ctx, actionRun.RepoID, actionRun.ConcurrencyGroup, []actions_model.Status{actions_model.StatusRunning})
+	runs, jobs, err := actions_model.GetConcurrentRunsAndJobs(ctx, actionRun.RepoID, actionRun.ConcurrencyGroup, []actions_model.Status{actions_model.StatusRunning, actions_model.StatusWaiting})
 	if err != nil {
 		return false, fmt.Errorf("find concurrent runs and jobs: %w", err)
 	}
