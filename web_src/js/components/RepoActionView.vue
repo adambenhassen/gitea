@@ -114,6 +114,7 @@ export default defineComponent({
       currentJobStepsStates: [] as Array<JobStepState>,
       artifacts: [] as Array<Record<string, any>>,
       menuVisible: false,
+      rerunMenuVisible: false,
       isFullScreen: false,
       timeVisible: {
         'log-time-stamp': false,
@@ -131,6 +132,7 @@ export default defineComponent({
         canCancel: false,
         canApprove: false,
         canRerun: false,
+        canRerunFailed: false,
         canDeleteArtifact: false,
         done: false,
         workflowID: '',
@@ -436,6 +438,7 @@ export default defineComponent({
 
     closeDropdown() {
       if (this.menuVisible) this.menuVisible = false;
+      if (this.rerunMenuVisible) this.rerunMenuVisible = false;
     },
 
     elStepsContainer(): HTMLElement {
@@ -489,6 +492,24 @@ export default defineComponent({
         <button class="ui basic small compact button red" @click="cancelRun()" v-else-if="run.canCancel">
           {{ locale.cancel }}
         </button>
+        <!-- Dropdown menu when there are failed jobs to offer rerun options -->
+        <div class="ui top right pointing dropdown custom jump item tw-shrink-0"
+             @click.stop="rerunMenuVisible = !rerunMenuVisible"
+             v-else-if="run.canRerun && run.canRerunFailed">
+          <button class="ui basic small compact button">
+            {{ locale.rerun }}
+            <SvgIcon name="octicon-triangle-down" :size="14"/>
+          </button>
+          <div class="menu transition" :class="{visible: rerunMenuVisible}" v-if="rerunMenuVisible" v-cloak>
+            <a class="item link-action" :data-url="`${run.link}/rerun`">
+              {{ locale.rerun_all }}
+            </a>
+            <a class="item link-action" :data-url="`${run.link}/rerun?failed_only=true`">
+              {{ locale.rerun_failed }}
+            </a>
+          </div>
+        </div>
+        <!-- Simple rerun button when no failed jobs -->
         <button class="ui basic small compact button link-action tw-shrink-0" :data-url="`${run.link}/rerun`" v-else-if="run.canRerun">
           {{ locale.rerun_all }}
         </button>

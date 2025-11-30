@@ -122,6 +122,7 @@ type ViewResponse struct {
 			CanCancel         bool          `json:"canCancel"`
 			CanApprove        bool          `json:"canApprove"` // the run needs an approval and the doer has permission to approve
 			CanRerun          bool          `json:"canRerun"`
+			CanRerunFailed    bool          `json:"canRerunFailed"`
 			CanDeleteArtifact bool          `json:"canDeleteArtifact"`
 			Done              bool          `json:"done"`
 			WorkflowID        string        `json:"workflowID"`
@@ -237,6 +238,15 @@ func ViewPost(ctx *context_module.Context) {
 	resp.State.Run.CanCancel = !run.Status.IsDone() && ctx.Repo.CanWrite(unit.TypeActions)
 	resp.State.Run.CanApprove = run.NeedApproval && ctx.Repo.CanWrite(unit.TypeActions)
 	resp.State.Run.CanRerun = run.Status.IsDone() && ctx.Repo.CanWrite(unit.TypeActions)
+	// Count failed jobs to determine if "rerun failed" button should be shown
+	failedCount := 0
+	for _, j := range jobs {
+		if j.Status == actions_model.StatusFailure {
+			failedCount++
+		}
+	}
+	// Show "rerun failed" only if some (but not all) jobs failed
+	resp.State.Run.CanRerunFailed = resp.State.Run.CanRerun && failedCount > 0 && failedCount < len(jobs)
 	resp.State.Run.CanDeleteArtifact = run.Status.IsDone() && ctx.Repo.CanWrite(unit.TypeActions)
 	resp.State.Run.Done = run.Status.IsDone()
 	resp.State.Run.WorkflowID = run.WorkflowID
@@ -474,6 +484,26 @@ func Rerun(ctx *context_module.Context) {
 	}
 
 	isRunBlocked := run.Status == actions_model.StatusBlocked
+
+	// Handle rerun of failed jobs only
+	if ctx.FormBool("failed_only") {
+		rerunJobs := actions_service.GetAllRerunJobsFromFailed(jobs)
+		if len(rerunJobs) == 0 {
+			ctx.JSONError(ctx.Locale.Tr("actions.runs.no_failed_jobs"))
+			return
+		}
+		for _, j := range rerunJobs {
+			// Failed jobs start as waiting, dependent jobs start as blocked
+			shouldBlockJob := j.Status != actions_model.StatusFailure || isRunBlocked
+			if err := rerunJob(ctx, j, shouldBlockJob); err != nil {
+				ctx.ServerError("RerunJob", err)
+				return
+			}
+		}
+		ctx.JSONOK()
+		return
+	}
+
 	if jobIndexStr == "" { // rerun all jobs
 		for _, j := range jobs {
 			// if the job has needs, it should be set to "blocked" status to wait for other jobs
