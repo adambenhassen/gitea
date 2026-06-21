@@ -460,6 +460,20 @@ onBeforeUnmount(() => {
   background-color: var(--color-active);
 }
 
+/* The row's link/toggle uses display:contents (tw-contents) so only its
+   icon+text were clickable. Stretch its ::after over the whole row so the
+   entire item is the click target. The re-run button opts back above it. */
+.job-brief-item {
+  position: relative;
+}
+
+.job-brief-item > a::after,
+.job-brief-item > button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
 .caller-row-toggle {
   border: none;
   padding: 0;
@@ -488,9 +502,12 @@ onBeforeUnmount(() => {
   margin-left: auto;
 }
 
-/* the re-run button replaces the duration on hover or job-link focus */
+/* the re-run button replaces the duration on hover or job-link focus;
+   position/z-index keep it clickable above the stretched row link ::after */
 .action-view-sidebar-list > .item .job-rerun-button {
   display: none;
+  position: relative;
+  z-index: 1;
 }
 
 .action-view-sidebar-list > .item:hover .job-rerun-button,
