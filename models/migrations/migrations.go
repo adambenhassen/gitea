@@ -417,6 +417,7 @@ func prepareMigrationTasks() []*migration {
 		newMigration(337, "Add visibility to team", v1_27.AddVisibilityToTeam),
 		newMigration(338, "Expand legacy MSSQL issue/comment long-text columns", v1_27.ExpandIssueAndCommentLongTextFieldsForMSSQL),
 		newMigration(339, "Extend action c_u index to include created_unix for faster dashboard feed queries", v1_27.AddCreatedUnixToActionUserIsDeletedIndex),
+		newMigration(340, "Add log_line_steps to action_task for per-step log attribution", v1_27.AddLogLineStepsToActionTask),
 	}
 	return preparedMigrations
 }
