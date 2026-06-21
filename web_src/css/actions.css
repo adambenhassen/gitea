@@ -51,6 +51,9 @@
 
 .run-list-ref {
   display: inline-block !important;
+  /* flex item: min-width auto = the nowrap label's full width, which beats
+     max-width and overflows; min-width 0 lets max-width + ellipsis truncate */
+  min-width: 0;
   max-width: 105px;
 }
 
