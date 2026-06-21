@@ -294,3 +294,5 @@ replace github.com/Azure/azure-sdk-for-go/sdk/azcore => github.com/Azure/azure-s
 replace github.com/Azure/azure-sdk-for-go/sdk/storage/azblob => github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.2 // v1.6.4+ uses API version unsupported by Azurite in CI
 
 replace github.com/microsoft/go-mssqldb => github.com/microsoft/go-mssqldb v1.9.7 // downgraded with Azure SDK
+
+replace gitea.dev/actions-proto-go => github.com/adambenhassen/actions-proto-go v0.6.2

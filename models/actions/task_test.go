@@ -4,6 +4,7 @@
 package actions
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -174,6 +175,102 @@ func TestTaskCancellingFinalizesToCancelled(t *testing.T) {
 	})
 }
 
+func TestUpdateTaskByStateCreatesReusableWorkflowSteps(t *testing.T) {
+	require.NoError(t, unittest.PrepareTestDatabase())
+
+	run := &ActionRun{
+		Title:         "reusable-workflow-run",
+		RepoID:        1,
+		OwnerID:       2,
+		WorkflowID:    "caller.yaml",
+		Index:         998,
+		TriggerUserID: 2,
+		Ref:           "refs/heads/master",
+		CommitSHA:     "c2d72f548424103f01ee1dc02889c1e2bff816b0",
+		Event:         "push",
+		TriggerEvent:  "push",
+		Status:        StatusRunning,
+		Started:       timeutil.TimeStampNow(),
+	}
+	require.NoError(t, db.Insert(t.Context(), run))
+
+	// A `uses:` caller job has no steps of its own, so the task is created with
+	// zero pre-seeded steps.
+	job := &ActionRunJob{
+		RunID:     run.ID,
+		RepoID:    run.RepoID,
+		OwnerID:   run.OwnerID,
+		CommitSHA: run.CommitSHA,
+		Name:      "reusable-caller-job",
+		Attempt:   1,
+		JobID:     "reusable-caller-job",
+		Status:    StatusRunning,
+	}
+	require.NoError(t, db.Insert(t.Context(), job))
+
+	runner := &ActionRunner{
+		UUID: "runner-reusable-steps",
+		Name: "runner-reusable-steps",
+	}
+	require.NoError(t, db.Insert(t.Context(), runner))
+
+	task := &ActionTask{
+		JobID:     job.ID,
+		Attempt:   1,
+		RunnerID:  runner.ID,
+		Status:    StatusRunning,
+		Started:   timeutil.TimeStampNow(),
+		RepoID:    run.RepoID,
+		OwnerID:   run.OwnerID,
+		CommitSHA: run.CommitSHA,
+	}
+	require.NoError(t, db.Insert(t.Context(), task))
+
+	job.TaskID = task.ID
+	_, err := UpdateRunJob(t.Context(), job, nil, "task_id")
+	require.NoError(t, err)
+
+	// The runner reports steps that originate from the called reusable workflow.
+	// None of them were pre-seeded at task creation.
+	_, err = UpdateTaskByState(t.Context(), task.RunnerID, &runnerv1.TaskState{
+		Id: task.ID,
+		Steps: []*runnerv1.StepState{
+			{
+				Id:        0,
+				Name:      "Run actions/checkout@v4",
+				Result:    runnerv1.Result_RESULT_SUCCESS,
+				LogIndex:  0,
+				LogLength: 5,
+				StartedAt: timestamppb.Now(),
+				StoppedAt: timestamppb.Now(),
+			},
+			{
+				// No name reported: must fall back to a generic label.
+				Id:        1,
+				LogIndex:  5,
+				LogLength: 3,
+				StartedAt: timestamppb.Now(),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	steps, err := GetTaskStepsByTaskID(t.Context(), task.ID)
+	require.NoError(t, err)
+	require.Len(t, steps, 2, "reported reusable-workflow steps must be persisted")
+
+	assert.Equal(t, int64(0), steps[0].Index)
+	assert.Equal(t, "Run actions/checkout@v4", steps[0].Name)
+	assert.Equal(t, StatusSuccess, steps[0].Status)
+	assert.Equal(t, int64(5), steps[0].LogLength)
+
+	assert.Equal(t, int64(1), steps[1].Index)
+	assert.Equal(t, "Step 2", steps[1].Name)
+	assert.Equal(t, StatusRunning, steps[1].Status)
+	assert.Equal(t, int64(5), steps[1].LogIndex)
+	assert.Equal(t, int64(3), steps[1].LogLength)
+}
+
 func TestStopTaskCancellingFallsBackForLegacyRunner(t *testing.T) {
 	require.NoError(t, unittest.PrepareTestDatabase())
 
@@ -305,4 +402,98 @@ func TestStopTaskCancellingFallsBackForMissingRunner(t *testing.T) {
 	jobAfterStop := unittest.AssertExistsAndLoadBean(t, &ActionRunJob{ID: job.ID})
 	assert.Equal(t, StatusCancelled, jobAfterStop.Status)
 	assert.NotZero(t, jobAfterStop.Stopped)
+}
+
+// newRunningReusableTask creates a run/job/runner/task in the running state with
+// no pre-seeded steps (the shape of a workflow_call caller job).
+func newRunningReusableTask(t *testing.T) *ActionTask {
+	t.Helper()
+	run := &ActionRun{
+		Title: "reusable-run", RepoID: 1, OwnerID: 2, WorkflowID: "caller.yaml",
+		Index: 997, TriggerUserID: 2, Ref: "refs/heads/master",
+		CommitSHA: "c2d72f548424103f01ee1dc02889c1e2bff816b0",
+		Event:     "push", TriggerEvent: "push", Status: StatusRunning, Started: timeutil.TimeStampNow(),
+	}
+	require.NoError(t, db.Insert(t.Context(), run))
+	job := &ActionRunJob{
+		RunID: run.ID, RepoID: run.RepoID, OwnerID: run.OwnerID, CommitSHA: run.CommitSHA,
+		Name: "caller", Attempt: 1, JobID: "caller", Status: StatusRunning,
+	}
+	require.NoError(t, db.Insert(t.Context(), job))
+	runner := &ActionRunner{UUID: "runner-" + t.Name(), Name: "runner-" + t.Name()}
+	require.NoError(t, db.Insert(t.Context(), runner))
+	task := &ActionTask{
+		JobID: job.ID, Attempt: 1, RunnerID: runner.ID, Status: StatusRunning,
+		Started: timeutil.TimeStampNow(), RepoID: run.RepoID, OwnerID: run.OwnerID, CommitSHA: run.CommitSHA,
+	}
+	require.NoError(t, db.Insert(t.Context(), task))
+	job.TaskID = task.ID
+	_, err := UpdateRunJob(t.Context(), job, nil, "task_id")
+	require.NoError(t, err)
+	return task
+}
+
+// TestUpdateTaskByStateNormalJobInsertsNoExtraSteps verifies that for an
+// ordinary job whose steps were pre-seeded, re-reporting those same step
+// indexes never inserts duplicate rows (the highest-blast-radius guarantee).
+func TestUpdateTaskByStateNormalJobInsertsNoExtraSteps(t *testing.T) {
+	require.NoError(t, unittest.PrepareTestDatabase())
+	task := newRunningReusableTask(t)
+
+	// Pre-seed two steps, as CreateTaskForRunner does for a job with steps.
+	for i := range 2 {
+		require.NoError(t, db.Insert(t.Context(), &ActionTaskStep{
+			Name: fmt.Sprintf("seeded-%d", i), TaskID: task.ID, Index: int64(i),
+			RepoID: task.RepoID, Status: StatusWaiting,
+		}))
+	}
+
+	_, err := UpdateTaskByState(t.Context(), task.RunnerID, &runnerv1.TaskState{
+		Id: task.ID,
+		Steps: []*runnerv1.StepState{
+			{Id: 0, Result: runnerv1.Result_RESULT_SUCCESS, StartedAt: timestamppb.Now(), StoppedAt: timestamppb.Now()},
+			{Id: 1, StartedAt: timestamppb.Now()},
+		},
+	})
+	require.NoError(t, err)
+
+	steps, err := GetTaskStepsByTaskID(t.Context(), task.ID)
+	require.NoError(t, err)
+	require.Len(t, steps, 2, "re-reporting seeded indexes must not insert duplicates")
+	assert.Equal(t, StatusSuccess, steps[0].Status)
+	assert.Equal(t, StatusRunning, steps[1].Status)
+}
+
+// TestUpdateTaskByStateReusableStepsIdempotent verifies that repeated state
+// reports (heartbeats) neither duplicate the dynamically-inserted steps nor
+// drop status transitions on them.
+func TestUpdateTaskByStateReusableStepsIdempotent(t *testing.T) {
+	require.NoError(t, unittest.PrepareTestDatabase())
+	task := newRunningReusableTask(t)
+
+	// First report: two inner steps, both running (no final task result).
+	_, err := UpdateTaskByState(t.Context(), task.RunnerID, &runnerv1.TaskState{
+		Id: task.ID,
+		Steps: []*runnerv1.StepState{
+			{Id: 0, Name: "build", LogLength: 4, StartedAt: timestamppb.Now()},
+			{Id: 1, Name: "test", LogIndex: 4, StartedAt: timestamppb.Now()},
+		},
+	})
+	require.NoError(t, err)
+
+	// Second report (heartbeat): same steps, step 0 now finished.
+	_, err = UpdateTaskByState(t.Context(), task.RunnerID, &runnerv1.TaskState{
+		Id: task.ID,
+		Steps: []*runnerv1.StepState{
+			{Id: 0, Name: "build", Result: runnerv1.Result_RESULT_SUCCESS, LogLength: 4, StartedAt: timestamppb.Now(), StoppedAt: timestamppb.Now()},
+			{Id: 1, Name: "test", LogIndex: 4, StartedAt: timestamppb.Now()},
+		},
+	})
+	require.NoError(t, err)
+
+	steps, err := GetTaskStepsByTaskID(t.Context(), task.ID)
+	require.NoError(t, err)
+	require.Len(t, steps, 2, "repeated reports must not duplicate dynamic steps")
+	assert.Equal(t, StatusSuccess, steps[0].Status, "status transition must be applied on re-report")
+	assert.Equal(t, StatusRunning, steps[1].Status)
 }

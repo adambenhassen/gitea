@@ -156,6 +156,28 @@ func TestFullSteps(t *testing.T) {
 				{Name: postStepName, Status: actions_model.StatusSuccess, LogIndex: 90, LogLength: 10, Started: 10090, Stopped: 10100},
 			},
 		},
+		{
+			// Steps inserted dynamically for a reusable-workflow (workflow_call)
+			// caller job: they carry names and must render per-step (the normal
+			// path) rather than collapsing into the empty-steps fallback.
+			name: "reusable workflow inner steps",
+			task: &actions_model.ActionTask{
+				Steps: []*actions_model.ActionTaskStep{
+					{Name: "build", Status: actions_model.StatusSuccess, LogIndex: 10, LogLength: 40, Started: 10010, Stopped: 10050},
+					{Name: "test", Status: actions_model.StatusSuccess, LogIndex: 50, LogLength: 40, Started: 10050, Stopped: 10090},
+				},
+				Status:    actions_model.StatusSuccess,
+				Started:   10000,
+				Stopped:   10100,
+				LogLength: 100,
+			},
+			want: []*actions_model.ActionTaskStep{
+				{Name: preStepName, Status: actions_model.StatusSuccess, LogIndex: 0, LogLength: 10, Started: 10000, Stopped: 10010},
+				{Name: "build", Status: actions_model.StatusSuccess, LogIndex: 10, LogLength: 40, Started: 10010, Stopped: 10050},
+				{Name: "test", Status: actions_model.StatusSuccess, LogIndex: 50, LogLength: 40, Started: 10050, Stopped: 10090},
+				{Name: postStepName, Status: actions_model.StatusSuccess, LogIndex: 90, LogLength: 10, Started: 10090, Stopped: 10100},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

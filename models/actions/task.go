@@ -405,7 +405,9 @@ func UpdateTaskByState(ctx context.Context, runnerID int64, state *runnerv1.Task
 			return nil, err
 		}
 
+		seededIndexes := make(map[int64]bool, len(task.Steps))
 		for _, step := range task.Steps {
+			seededIndexes[step.Index] = true
 			var result runnerv1.Result
 			if v, ok := stepStates[step.Index]; ok {
 				result = v.Result
@@ -422,6 +424,45 @@ func UpdateTaskByState(ctx context.Context, runnerID int64, state *runnerv1.Task
 			if _, err := e.ID(step.ID).Update(step); err != nil {
 				return nil, err
 			}
+		}
+
+		// Steps reported by the runner that were not pre-seeded at task creation
+		// come from a called (workflow_call) reusable workflow, whose steps are
+		// not known until runtime. Insert them so their logs are attributed to a
+		// real step in the job log viewer instead of being left unattributed.
+		for _, v := range state.Steps {
+			// state.Steps is runner-supplied (gRPC boundary): skip invalid indexes
+			// and guard against a duplicate index within a single payload, which
+			// would otherwise hit the (task_id, index) unique constraint and abort
+			// the whole transaction (rolling back the task/step status updates).
+			if v.Id < 0 || seededIndexes[v.Id] {
+				continue
+			}
+			seededIndexes[v.Id] = true
+			name := v.Name
+			if name == "" {
+				name = fmt.Sprintf("Step %d", v.Id+1)
+			}
+			step := &ActionTaskStep{
+				Name:      util.EllipsisDisplayString(name, 255),
+				TaskID:    task.ID,
+				Index:     v.Id,
+				RepoID:    task.RepoID,
+				LogIndex:  v.LogIndex,
+				LogLength: v.LogLength,
+				Started:   convertTimestamp(v.StartedAt),
+				Stopped:   convertTimestamp(v.StoppedAt),
+				Status:    StatusWaiting,
+			}
+			if v.Result != runnerv1.Result_RESULT_UNSPECIFIED {
+				step.Status = StatusFromResult(v.Result)
+			} else if step.Started != 0 {
+				step.Status = StatusRunning
+			}
+			if _, err := e.Insert(step); err != nil {
+				return nil, fmt.Errorf("insert reusable-workflow step (task %d index %d): %w", task.ID, v.Id, err)
+			}
+			task.Steps = append(task.Steps, step)
 		}
 
 		return task, nil
