@@ -141,6 +141,14 @@ func createCommitStatus(ctx context.Context, repo *repo_model.Repository, event,
 	runName := path.Base(run.WorkflowID)
 	// fall back to the file name when the workflow has no non-blank `name:`
 	if wfs, err := jobparser.Parse(job.WorkflowPayload); err == nil && len(wfs) > 0 {
+		// Reusable-workflow caller jobs (`uses:`) delegate to the called
+		// workflow's own jobs, which each report their own commit status.
+		// Emitting a status for the caller too duplicates every check (e.g. the
+		// caller "CI / frontend-tests" alongside the inner "CI / Test Frontend"),
+		// so skip the caller and let the called workflow's jobs report.
+		if _, j := wfs[0].Job(); j != nil && strings.TrimSpace(j.Uses) != "" {
+			return nil
+		}
 		if name := strings.TrimSpace(wfs[0].Name); name != "" {
 			runName = name
 		}

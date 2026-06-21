@@ -311,3 +311,34 @@ func findCommitStatusesForContext(t *testing.T, repoID int64, sha, context strin
 	require.NoError(t, err)
 	return statuses
 }
+
+func TestCreateCommitStatus_SkipsReusableWorkflowCaller(t *testing.T) {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 4})
+	branch := unittest.AssertExistsAndLoadBean(t, &git_model.Branch{RepoID: repo.ID, Name: repo.DefaultBranch})
+
+	run := &actions_model.ActionRun{
+		ID: 99501, Index: 99501, RepoID: repo.ID, Repo: repo, OwnerID: repo.OwnerID, TriggerUserID: repo.OwnerID,
+		WorkflowID: "ci.yaml", CommitSHA: branch.CommitID,
+	}
+	require.NoError(t, db.Insert(t.Context(), run))
+
+	// A reusable-workflow caller job: no steps, just `uses:`. It must not emit a
+	// commit status (the called workflow's own jobs report instead).
+	caller := &actions_model.ActionRunJob{
+		ID: 99511, RunID: run.ID, RepoID: repo.ID, OwnerID: repo.OwnerID,
+		Name: "frontend-tests", Status: actions_model.StatusWaiting,
+		WorkflowPayload: []byte(`name: CI
+on: pull_request
+jobs:
+  frontend-tests:
+    uses: ./.github/workflows/ci-frontend.yml
+`),
+	}
+	require.NoError(t, db.Insert(t.Context(), caller))
+	require.NoError(t, createCommitStatus(t.Context(), repo, "pull_request", branch.CommitID, run, caller))
+
+	statuses := findCommitStatusesForContext(t, repo.ID, branch.CommitID, "CI / frontend-tests (pull_request)")
+	assert.Empty(t, statuses, "reusable-workflow caller job must not emit a commit status")
+}
