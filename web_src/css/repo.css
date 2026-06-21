@@ -1845,7 +1845,7 @@ tbody.commit-list {
 }
 
 .commit-status-list {
-  max-height: 240px; /* fit exactly 6 items, commit-status-item.height * 6 */
+  max-height: none; /* show all status checks without scrolling */
   overflow-x: hidden;
   transition: max-height .2s;
   width: 100%;
