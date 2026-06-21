@@ -49,11 +49,11 @@
   flex: 0 0 280px;
 }
 
-.run-list-ref {
-  display: inline-block !important;
-  /* flex item: min-width auto = the nowrap label's full width, which beats
-     max-width and overflows; min-width 0 lets max-width + ellipsis truncate */
-  min-width: 0;
+/* .run-list-ref is a .ui.label, whose max-width:100% (specificity 0,2,0)
+   overrides a plain .run-list-ref selector (0,1,0); qualify with the ancestor
+   chain (0,3,0) so this max-width wins and a long ref truncates with ellipsis. */
+.run-list .item-trailing .run-list-ref {
+  display: inline-block;
   max-width: 105px;
 }
 
@@ -64,8 +64,10 @@
     width: auto;
     flex-basis: auto;
   }
-  .run-list-item-right,
-  .run-list-ref {
+  .run-list-item-right {
+    max-width: 110px;
+  }
+  .run-list .item-trailing .run-list-ref {
     max-width: 110px;
   }
 }
