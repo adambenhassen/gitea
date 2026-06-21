@@ -32,6 +32,9 @@ const visibleJobSummaries = computed(() => {
 type JobListItem = {
   job: ActionsJob;
   depth: number;
+  // A reusable caller with exactly one (non-caller) child is rendered as a
+  // single row linking straight to that child's logs, skipping the expand step.
+  soleChild?: ActionsJob;
 };
 
 // Caller jobs default to collapsed. Membership in this set means "user has manually expanded this caller"
@@ -76,6 +79,13 @@ const visibleJobListItems = computed<JobListItem[]>(() => {
   while (stack.length > 0) {
     const {job, depth} = stack.pop()!;
     const children = childrenByParent.get(job.id) || [];
+    // A reusable caller with a single non-caller child has no real choice to
+    // disclose: collapse it into one row that links straight to the child's
+    // logs (labelled with the child's name), and don't list the child separately.
+    if (job.isReusableCaller && children.length === 1 && !children[0].isReusableCaller) {
+      result.push({job, depth, soleChild: children[0]});
+      continue;
+    }
     result.push({job, depth});
     if (children.length > 0 && isJobCollapsed(job.id)) continue;
     for (let i = children.length - 1; i >= 0; i--) stack.push({job: children[i], depth: depth + 1});
@@ -217,15 +227,26 @@ onBeforeUnmount(() => {
         <div class="flex-items-block action-view-sidebar-list">
           <div
             class="item job-brief-item"
-            :class="{'selected': props.jobId === item.job.id}"
+            :class="{'selected': props.jobId === item.job.id || (item.soleChild && props.jobId === item.soleChild.id)}"
             :style="{paddingLeft: `${10 + item.depth * 16}px`}"
             v-for="item in visibleJobListItems"
             :key="item.job.id"
           >
+            <!-- A reusable caller with a single child links straight to that child's logs
+                 (no expand step), showing the child's name when it has one. -->
+            <a
+              v-if="item.soleChild"
+              class="tw-contents silenced"
+              :href="item.soleChild.link"
+            >
+              <ActionStatusIcon :locale-status="locale.status[item.job.status]" :status="item.job.status" icon-variant="circle-fill"/>
+              <span class="tw-min-w-0 gt-ellipsis">{{ item.soleChild.name || item.job.name }}</span>
+              <span class="job-duration">{{ item.job.duration }}</span>
+            </a>
             <!-- Callers have no log page of their own; the whole row toggles expansion
                  (matches GitHub Actions, where caller rows are not navigation targets). -->
             <button
-              v-if="item.job.isReusableCaller"
+              v-else-if="item.job.isReusableCaller"
               type="button"
               class="tw-contents caller-row-toggle"
               @click="toggleExpandedJob(item.job.id)"
