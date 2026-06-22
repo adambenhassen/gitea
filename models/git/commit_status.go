@@ -416,47 +416,37 @@ func GetLatestCommitStatusForPairs(ctx context.Context, repoSHAs []RepoSHA) (map
 	return repoStatuses, nil
 }
 
-// GetLatestCommitStatusForRepoCommitIDs returns all statuses with a unique context for a given list of repo-sha pairs
+// GetLatestCommitStatusForRepoCommitIDs returns the latest status per unique context for each of the given commit SHAs within a single repository, keyed by SHA
 func GetLatestCommitStatusForRepoCommitIDs(ctx context.Context, repoID int64, commitIDs []string) (map[string][]*CommitStatus, error) {
-	type result struct {
-		Index int64
-		SHA   string
-	}
-
-	getBase := func() db.Session {
-		return db.GetEngine(ctx).Table(&CommitStatus{}).Where("repo_id = ?", repoID)
-	}
-	results := make([]result, 0, len(commitIDs))
-
-	conds := make([]builder.Cond, 0, len(commitIDs))
-	for _, sha := range commitIDs {
-		conds = append(conds, builder.Eq{"sha": sha})
-	}
-	sess := getBase().And(builder.Or(conds...)).
-		Select("max( `index` ) as `index`, sha").
-		GroupBy("context_hash, sha").OrderBy("max( `index` ) desc")
-
-	err := sess.Find(&results)
-	if err != nil {
-		return nil, err
-	}
-
 	repoStatuses := make(map[string][]*CommitStatus)
+	seen := make(map[string]bool) // tracks the latest status seen per sha+context_hash
 
-	if len(results) > 0 {
-		statuses := make([]*CommitStatus, 0, len(results))
+	// Query in batches using an IN clause: unlike a long OR chain (one term per
+	// commit), a single IN keeps the expression tree shallow so databases such
+	// as SQLite don't reject it for exceeding their maximum expression depth,
+	// while batching keeps the bound parameter count within database limits.
+	const batchSize = 1000
+	for i := 0; i < len(commitIDs); i += batchSize {
+		batch := commitIDs[i:min(i+batchSize, len(commitIDs))]
 
-		conds = make([]builder.Cond, 0, len(results))
-		for _, result := range results {
-			conds = append(conds, builder.Eq{"`index`": result.Index, "sha": result.SHA})
-		}
-		err = getBase().And(builder.Or(conds...)).Find(&statuses)
+		statuses := make([]*CommitStatus, 0, len(batch))
+		err := db.GetEngine(ctx).Table(&CommitStatus{}).
+			Where("repo_id = ?", repoID).
+			And(builder.In("sha", batch)).
+			OrderBy("`index` desc").
+			Find(&statuses)
 		if err != nil {
 			return nil, err
 		}
 
-		// Group the statuses by commit
+		// Rows are ordered by descending index, so the first one seen for each
+		// sha+context_hash is the latest status for that context.
 		for _, status := range statuses {
+			key := status.SHA + "/" + status.ContextHash
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 			repoStatuses[status.SHA] = append(repoStatuses[status.SHA], status)
 		}
 	}

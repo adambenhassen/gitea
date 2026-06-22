@@ -66,6 +66,75 @@ func TestGetCommitStatuses(t *testing.T) {
 	assert.Empty(t, statuses)
 }
 
+func TestGetLatestCommitStatusForRepoCommitIDs(t *testing.T) {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+
+	repo1 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1})
+	sha1 := "1234123412341234123412341234123412341234" // the mocked commit ID in test fixtures
+
+	statusMap, err := git_model.GetLatestCommitStatusForRepoCommitIDs(t.Context(), repo1.ID, []string{sha1})
+	assert.NoError(t, err)
+
+	// Only the latest status per context is kept: ci/awesomeness (index 4),
+	// cov/awesomeness (index 3) and deploy/awesomeness (index 5).
+	statuses := statusMap[sha1]
+	assert.Len(t, statuses, 3)
+	latest := make(map[string]int64, len(statuses))
+	for _, s := range statuses {
+		latest[s.Context] = s.Index
+	}
+	assert.Equal(t, map[string]int64{
+		"ci/awesomeness":     4,
+		"cov/awesomeness":    3,
+		"deploy/awesomeness": 5,
+	}, latest)
+}
+
+func TestGetLatestCommitStatusForRepoCommitIDsBatching(t *testing.T) {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1})
+	shaA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	shaB := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	// Prepare two distinct commits, each with several statuses sharing contexts
+	// across multiple indexes, so the latest-per-context dedup is exercised.
+	rows := []*git_model.CommitStatus{
+		{RepoID: repo.ID, Index: 1, SHA: shaA, CreatorID: 2, Context: "lint", ContextHash: "hash-lint", State: commitstatus.CommitStatusPending},
+		{RepoID: repo.ID, Index: 2, SHA: shaA, CreatorID: 2, Context: "lint", ContextHash: "hash-lint", State: commitstatus.CommitStatusSuccess},
+		{RepoID: repo.ID, Index: 3, SHA: shaA, CreatorID: 2, Context: "build", ContextHash: "hash-build", State: commitstatus.CommitStatusFailure},
+		{RepoID: repo.ID, Index: 1, SHA: shaB, CreatorID: 2, Context: "test", ContextHash: "hash-test", State: commitstatus.CommitStatusError},
+	}
+	for _, row := range rows {
+		assert.NoError(t, db.Insert(t.Context(), row))
+	}
+
+	// Multiple SHAs in one call are grouped separately, keeping only the latest
+	// status per context (shaA: lint index 2 + build index 3; shaB: test index 1).
+	statusMap, err := git_model.GetLatestCommitStatusForRepoCommitIDs(t.Context(), repo.ID, []string{shaA, shaB})
+	assert.NoError(t, err)
+	assert.Len(t, statusMap[shaA], 2)
+	assert.Len(t, statusMap[shaB], 1)
+
+	// A SHA repeated on both sides of the batch boundary must still be deduped
+	// to a single set of statuses (the seen map spans batches).
+	commitIDs := make([]string, 0, 1002)
+	commitIDs = append(commitIDs, shaA)
+	for i := range 1000 {
+		commitIDs = append(commitIDs, fmt.Sprintf("%040d", i))
+	}
+	commitIDs = append(commitIDs, shaA)
+	statusMap, err = git_model.GetLatestCommitStatusForRepoCommitIDs(t.Context(), repo.ID, commitIDs)
+	assert.NoError(t, err)
+	assert.Len(t, statusMap[shaA], 2)
+
+	// Empty input yields an empty, non-nil map.
+	statusMap, err = git_model.GetLatestCommitStatusForRepoCommitIDs(t.Context(), repo.ID, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, statusMap)
+	assert.Empty(t, statusMap)
+}
+
 func Test_CalcCommitStatus(t *testing.T) {
 	kases := []struct {
 		statuses []*git_model.CommitStatus
