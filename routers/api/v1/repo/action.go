@@ -1391,6 +1391,76 @@ func GetWorkflowRunAttempt(ctx *context.APIContext) {
 	ctx.JSON(http.StatusOK, convertedRun)
 }
 
+// CancelWorkflowRun cancels a workflow run's unfinished jobs.
+func CancelWorkflowRun(ctx *context.APIContext) {
+	// swagger:operation POST /repos/{owner}/{repo}/actions/runs/{run}/cancel repository cancelWorkflowRun
+	// ---
+	// summary: Cancel a workflow run and its jobs
+	// produces:
+	// - application/json
+	// parameters:
+	// - name: owner
+	//   in: path
+	//   description: owner of the repo
+	//   type: string
+	//   required: true
+	// - name: repo
+	//   in: path
+	//   description: name of the repository
+	//   type: string
+	//   required: true
+	// - name: run
+	//   in: path
+	//   description: id of the run
+	//   type: integer
+	//   required: true
+	// responses:
+	//   "200":
+	//     "$ref": "#/responses/WorkflowRun"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
+	//   "404":
+	//     "$ref": "#/responses/notFound"
+
+	run, jobs := getCurrentRepoActionRunJobsByID(ctx)
+	if ctx.Written() {
+		return
+	}
+
+	var updatedJobs []*actions_model.ActionRunJob
+	if err := db.WithTx(ctx, func(ctx go_context.Context) error {
+		cancelledJobs, err := actions_model.CancelJobs(ctx, jobs)
+		if err != nil {
+			return fmt.Errorf("cancel jobs: %w", err)
+		}
+		updatedJobs = append(updatedJobs, cancelledJobs...)
+		return nil
+	}); err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+
+	actions_service.CreateCommitStatusForRunJobs(ctx, run, jobs...)
+	actions_service.EmitJobsIfReadyByJobs(updatedJobs)
+
+	actions_service.NotifyWorkflowJobsStatusUpdate(ctx, updatedJobs...)
+	if len(updatedJobs) > 0 {
+		actions_service.NotifyWorkflowRunStatusUpdateWithReload(ctx, run.RepoID, run.ID)
+	}
+
+	run, err := actions_model.GetRunByRepoAndID(ctx, run.RepoID, run.ID)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	convertedRun, err := convert.ToActionWorkflowRun(ctx, run, nil, false)
+	if err != nil {
+		ctx.APIErrorInternal(err)
+		return
+	}
+	ctx.JSON(http.StatusOK, convertedRun)
+}
+
 // RerunWorkflowRun Reruns an entire workflow run.
 func RerunWorkflowRun(ctx *context.APIContext) {
 	// swagger:operation POST /repos/{owner}/{repo}/actions/runs/{run}/rerun repository rerunWorkflowRun

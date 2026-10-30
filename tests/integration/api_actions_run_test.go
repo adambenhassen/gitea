@@ -41,6 +41,10 @@ func TestAPIActionsWorkflowRun(t *testing.T) {
 		defer tests.PrepareTestEnv(t)()
 		testAPIActionsRerunWorkflowJob(t)
 	})
+	t.Run("CancelWorkflowRun", func(t *testing.T) {
+		defer tests.PrepareTestEnv(t)()
+		testAPIActionsCancelWorkflowRun(t)
+	})
 }
 
 func testAPIActionsGetWorkflowRun(t *testing.T) {
@@ -229,6 +233,39 @@ func testAPIActionsRerunWorkflowRun(t *testing.T) {
 		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/999999/rerun", repo.FullName())).
 			AddTokenAuth(writeToken)
 		MakeRequest(t, req, http.StatusNotFound)
+	})
+}
+
+func testAPIActionsCancelWorkflowRun(t *testing.T) {
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 4})
+	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: repo.OwnerID})
+	session := loginUser(t, user.Name)
+
+	writeToken := getTokenForLoggedInUser(t, session, auth_model.AccessTokenScopeWriteRepository)
+	readToken := getTokenForLoggedInUser(t, session, auth_model.AccessTokenScopeReadRepository)
+
+	t.Run("ForbiddenWithoutWriteScope", func(t *testing.T) {
+		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/793/cancel", repo.FullName())).
+			AddTokenAuth(readToken)
+		MakeRequest(t, req, http.StatusForbidden)
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
+		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/999999/cancel", repo.FullName())).
+			AddTokenAuth(writeToken)
+		MakeRequest(t, req, http.StatusNotFound)
+	})
+
+	t.Run("Success", func(t *testing.T) {
+		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/793/cancel", repo.FullName())).
+			AddTokenAuth(writeToken)
+		resp := MakeRequest(t, req, http.StatusOK)
+		cancelResp := DecodeJSON(t, resp, &api.ActionWorkflowRun{})
+		assert.Equal(t, int64(793), cancelResp.ID)
+
+		// finished jobs keep their result; only unfinished ones are cancelled
+		assert.Equal(t, actions_model.StatusSuccess, unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunJob{ID: 195}).Status)
+		assert.Equal(t, actions_model.StatusCancelled, unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunJob{ID: 196}).Status)
 	})
 }
 
